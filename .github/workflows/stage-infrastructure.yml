@@ -1,0 +1,120 @@
+name: "Stage Terraform Deployment Workflow"
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "envs/stage/**/*"
+      - "modules/**/*"
+  pull_request:
+    paths:
+      - ".github/workflows/stage-infrastructure.yml"
+      - "envs/stage/**/*"
+      - "modules/**/*"
+env:
+  TF_LOG: INFO
+
+jobs:
+  Terraform:
+    name: 'Terraform'
+    runs-on: ubuntu-latest
+    environment: stage
+    env:
+      TF_VAR_var_one: ${{ secrets.var_one }}
+      TF_VAR_var_two: ${{ secrets.var_two }}
+    # Set the working directory to main for the config files
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./envs/stage
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.4.6
+
+      - name: Setup AWS Profile
+        uses: Fooji/create-aws-profile-action@v1
+        with:
+          profile: project-terraform-stage
+          region: ${{ secrets.AWS_REGION }}
+          key: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          secret: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform version
+        run: terraform -v
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: ./envs/stage
+        id: init
+
+      - name: Terraform Format
+        id: fmt
+        run: terraform fmt -check -recursive
+        working-directory: ./envs/stage
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate
+        working-directory: ./envs/stage
+
+      - name: Terraform Plan
+        id: plan
+        if: github.event_name == 'pull_request'
+        run: terraform plan -no-color
+        working-directory: ./envs/stage
+
+      - name: Update Pull Request
+        uses: actions/github-script@v6
+        if: github.event_name == 'pull_request'
+        env:
+          PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          retries: 3
+          script: |
+            const output = `
+            #### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+            #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
+            #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
+            <details><summary>Show Plan</summary>
+            \`\`\`${process.env.PLAN}\`\`\`
+            </details>
+             *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+
+      - name: Terraform Plan Status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: terraform apply -auto-approve
+        working-directory: ./envs/stage
+
+      - name: Report Status to Slack
+        uses: rtCamp/action-slack-notify@v2
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        with:
+          status: ${{ job.status }}
+          notify_when: 'failure'
+        env:
+          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
+          SLACK_COLOR: ${{ job.status }}
+          SLACK_ICON: https://github.com/rtCamp.png?size=48
+          SLACK_MESSAGE: 'Post Content :rocket:'
+          SLACK_TITLE: Terraform - AWS Stage Infrastructure Update
+          SLACK_USERNAME: githubBot
+          SLACK_WEBHOOK: ${{ secrets.SLACK_INFRA_WEBHOOK }}
